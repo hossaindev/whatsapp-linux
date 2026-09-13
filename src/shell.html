@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>WhatsApp</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100vw; height: 100vh; overflow: hidden;
+      background: #111b21;
+      display: flex; flex-direction: column;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ubuntu, Roboto, sans-serif;
+    }
+
+    /* ── Titlebar ─────────────────────────────────────────────────────────── */
+    #titlebar {
+      width: 100%; height: 32px; min-height: 32px; flex-shrink: 0;
+      display: flex; align-items: center;
+      background: #111b21;
+      border-bottom: 1px solid #1e2d36;
+      -webkit-app-region: drag;
+      user-select: none;
+      position: relative; z-index: 9999;
+    }
+
+    #tb-left {
+      display: flex; align-items: center; gap: 7px;
+      padding: 0 10px; flex: 1; min-width: 0; overflow: hidden;
+    }
+
+    /* WhatsApp icon */
+    .tb-logo { width: 17px; height: 17px; flex-shrink: 0; object-fit: contain; }
+
+    #tb-title {
+      font-size: 12.5px; font-weight: 500; color: #e9edef;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
+    #tb-unread {
+      font-size: 11px; color: #00a884; font-weight: 600; flex-shrink: 0;
+    }
+
+    /* ── Window buttons — NOT draggable ───────────────────────────────────── */
+    #tb-controls {
+      display: flex; align-items: center; height: 32px;
+      -webkit-app-region: no-drag; flex-shrink: 0;
+    }
+
+    .tb-btn {
+      width: 44px; height: 32px;
+      border: none; background: transparent;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; color: #8696a0;
+      transition: background 0.12s, color 0.12s;
+      -webkit-app-region: no-drag;
+      outline: none; padding: 0;
+    }
+    .tb-btn:hover          { background: #1f2c34; color: #e9edef; }
+    .tb-btn.close:hover    { background: #e81123; color: #fff; }
+    .tb-btn svg            { width: 11px; height: 11px; pointer-events: none; }
+
+    /* ── WebView fills rest ───────────────────────────────────────────────── */
+    webview {
+      flex: 1; width: 100%; border: none; display: flex;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ═══ Titlebar ═══ -->
+  <div id="titlebar">
+    <div id="tb-left">
+      <img class="tb-logo" src="../assets/whatsapp-color.png" alt="WhatsApp" draggable="false" />
+      <span id="tb-title">WhatsApp</span>
+      <span id="tb-unread"></span>
+    </div>
+
+    <div id="tb-controls">
+      <!-- Minimize -->
+      <button class="tb-btn" id="btn-min" title="Minimize">
+        <svg viewBox="0 0 11 1" fill="currentColor">
+          <rect width="11" height="1.2" rx="0.5"/>
+        </svg>
+      </button>
+      <!-- Maximize / Restore -->
+      <button class="tb-btn" id="btn-max" title="Maximize">
+        <svg id="max-svg" viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1.1">
+          <rect x="0.55" y="0.55" width="9.9" height="9.9" rx="0.5"/>
+        </svg>
+      </button>
+      <!-- Close -->
+      <button class="tb-btn close" id="btn-close" title="Close">
+        <svg viewBox="0 0 11 11" fill="none" stroke="currentColor"
+             stroke-width="1.35" stroke-linecap="round">
+          <line x1="1" y1="1" x2="10" y2="10"/>
+          <line x1="10" y1="1" x2="1" y2="10"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- ═══ WhatsApp Web webview ═══ -->
+  <webview
+    id="wa-view"
+    src="https://web.whatsapp.com"
+    partition="persist:whatsapp"
+    useragent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    webpreferences="contextIsolation=yes, nodeIntegration=no, sandbox=yes"
+  ></webview>
+
+  <script>
+    const waView  = document.getElementById('wa-view');
+    const titleEl = document.getElementById('tb-title');
+    const unread  = document.getElementById('tb-unread');
+    const maxSvg  = document.getElementById('max-svg');
+    const btnMax  = document.getElementById('btn-max');
+
+    // ── Window control buttons — work independently of any background setting ──
+    // Each button calls its action directly; tray/background-running is separate.
+    document.getElementById('btn-min').addEventListener('click', () => {
+      window.electronAPI.minimize();          // → minimise to taskbar
+    });
+    btnMax.addEventListener('click', () => {
+      window.electronAPI.maximize();          // → toggle maximise/restore
+    });
+    document.getElementById('btn-close').addEventListener('click', () => {
+      window.electronAPI.close();             // → just close this window
+    });
+
+    // Maximise icon: single square vs two overlapping squares
+    function setMaxIcon(isMax) {
+      btnMax.title = isMax ? 'Restore' : 'Maximize';
+      maxSvg.innerHTML = isMax
+        ? `<g fill="none" stroke="currentColor" stroke-width="1.1">
+             <rect x="2.5" y="0.55" width="8" height="8" rx="0.5"/>
+             <rect x="0.55" y="2.5" width="8" height="8" rx="0.5" fill="#111b21"/>
+             <rect x="0.55" y="2.5" width="8" height="8" rx="0.5"/>
+           </g>`
+        : `<rect x="0.55" y="0.55" width="9.9" height="9.9" rx="0.5"/>`;
+    }
+
+    window.electronAPI.isMaximized().then(setMaxIcon);
+    window.electronAPI.onWinState(({ maximized }) => setMaxIcon(maximized));
+
+    window.electronAPI.onCallAction(action => waView.send('call-action', action));
+
+    // ── Relay messages from webview to main process ───────────────────────────
+    waView.addEventListener('ipc-message', (e) => {
+      switch (e.channel) {
+        case 'call-state': window.electronAPI.sendCallState(e.args[0]); break;
+        case 'call-result': window.electronAPI.sendCallResult(e.args[0]); break;
+        case 'wa-notification':
+          window.electronAPI.sendNotification(e.args[0]);
+          break;
+        case 'unread-count': {
+          const n = e.args[0];
+          window.electronAPI.sendUnreadCount(n);
+          unread.textContent = n > 0 ? `(${n})` : '';
+          break;
+        }
+        case 'wa-title':
+          titleEl.textContent = e.args[0] || 'WhatsApp';
+          break;
+      }
+    });
+
+    // Open links in system browser
+    waView.addEventListener('new-window', (e) => {
+      if (e.url && !e.url.startsWith('https://web.whatsapp.com')) {
+        window.electronAPI.openExternal(e.url);
+      }
+    });
+
+    // ── Settings panel (triggered from tray menu) ─────────────────────────────
+    window.electronAPI.onOpenSettings(() => showSettings());
+
+    async function showSettings() {
+      if (document.getElementById('wa-cfg')) {
+        document.getElementById('wa-cfg').remove(); return;
+      }
+      const s = await window.electronAPI.getSettings();
+
+      const ov = document.createElement('div');
+      ov.id = 'wa-cfg';
+      Object.assign(ov.style, {
+        position: 'fixed', top: '32px', left: '0', right: '0', bottom: '0',
+        background: 'rgba(0,0,0,0.65)', zIndex: '9998',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontFamily: "system-ui, sans-serif",
+      });
+      ov.innerHTML = `
+        <div style="background:#1f2c34;color:#e9edef;border-radius:8px;
+                    padding:24px;width:420px;max-height:70vh;overflow-y:auto;
+                    box-shadow:0 8px 32px rgba(0,0,0,.6);">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
+            <h2 style="margin:0;font-size:15px;font-weight:600;">Settings</h2>
+            <button id="cfg-x" style="background:none;border:none;color:#8696a0;
+              font-size:19px;cursor:pointer;padding:2px 8px;">✕</button>
+          </div>
+          ${sec('Window')}
+          ${row('minimizeToTray','Minimize to tray when minimized',s.minimizeToTray)}
+          ${row('closeToTray','Run in background when closed',s.closeToTray)}
+          ${row('showUnreadCountInTitle','Show unread count in title bar',s.showUnreadCountInTitle)}
+          ${row('startMinimized','Start minimized',s.startMinimized)}
+          ${sec('Notifications')}
+          ${row('enableNotifications','Enable system notifications',s.enableNotifications)}
+          ${row('notificationSound','Notification sound',s.notificationSound)}
+          ${sec('Storage')}
+          <button id="cfg-cache">Clear temporary cache…</button>
+          <p id="cache-result" role="status"></p>
+          ${sec('Tray icon')}
+          <select id="cfg-tray" aria-label="Tray icon appearance">
+            <option value="color">Color (consistent)</option>
+            <option value="light">White (dark panel)</option>
+            <option value="dark">Black (light panel)</option>
+          </select>
+          ${sec('System')}
+          ${row('autoStart','Launch automatically at login',s.autoStart)}
+          <button id="cfg-save" style="margin-top:16px;background:#00a884;color:#fff;
+            border:none;border-radius:6px;padding:10px 0;font-size:14px;
+            font-weight:600;cursor:pointer;width:100%;">Save</button>
+        </div>`;
+      document.body.appendChild(ov);
+      document.getElementById('cfg-tray').value = s.trayAppearance || 'color';
+      document.getElementById('cfg-cache').onclick = async event => {
+        event.target.disabled = true;
+        try {
+          const result = await window.electronAPI.clearCache();
+          document.getElementById('cache-result').textContent = result.error || (result.cancelled ? 'Cancelled' : `Cleared ${(result.bytes / 1048576).toFixed(1)} MB. Login and chats kept.`);
+        } catch (_) { document.getElementById('cache-result').textContent = 'Unable to clear cache.'; }
+        finally { event.target.disabled = false; }
+      };
+      ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+      document.getElementById('cfg-x').onclick    = () => ov.remove();
+      document.getElementById('cfg-save').onclick = async () => {
+        const out = { trayAppearance: document.getElementById('cfg-tray').value };
+        ov.querySelectorAll('input[type=checkbox]')
+          .forEach(cb => { out[cb.dataset.key] = cb.checked; });
+        await window.electronAPI.saveSettings(out);
+        ov.remove();
+      };
+    }
+
+    function sec(label) {
+      return `<div style="color:#00a884;font-size:11px;font-weight:700;
+        margin:16px 0 8px;text-transform:uppercase;letter-spacing:.6px;">${label}</div>`;
+    }
+    function row(key, label, checked) {
+      return `<label style="display:flex;justify-content:space-between;
+        align-items:center;padding:10px 0;border-bottom:1px solid #2a3942;cursor:pointer;">
+        <span style="font-size:13.5px;">${label}</span>
+        <input type="checkbox" data-key="${key}" ${checked ? 'checked' : ''}
+          style="width:16px;height:16px;accent-color:#00a884;cursor:pointer;flex-shrink:0;"/>
+      </label>`;
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,55 @@
+{
+  "name": "whatsapp-linux",
+  "version": "1.1.0",
+  "description": "WhatsApp Desktop for Ubuntu Linux",
+  "author": {
+    "name": "WhatsApp Linux",
+    "email": "support@whatsapp-linux.app"
+  },
+  "homepage": "https://web.whatsapp.com",
+  "main": "src/main.js",
+  "dependencies": {
+    "dbus-next": "^0.10.2"
+  },
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.js",
+    "build": "electron-builder --linux deb --x64"
+  },
+  "devDependencies": {
+    "electron": "44.3.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.whatsapp.linux",
+    "productName": "WhatsApp",
+    "executableName": "whatsapp",
+    "linux": {
+      "target": [
+        "deb"
+      ],
+      "category": "Network;InstantMessaging",
+      "icon": "assets/icons",
+      "maintainer": "hossaindev",
+      "artifactName": "WhatsApp_${version}_amd64.deb"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "deb": {
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0"
+      ]
+    }
+  }
+}
