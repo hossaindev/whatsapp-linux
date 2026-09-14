@@ -87,6 +87,7 @@ function setAutostart(enable) {
       ['[Desktop Entry]', 'Type=Application', 'Name=WhatsApp',
        'Comment=WhatsApp Desktop', `Exec=${exec}`,
        'Icon=whatsapp', 'Terminal=false', 'Hidden=false',
+       'StartupWMClass=whatsapp',
        'X-GNOME-Autostart-enabled=true'].join('\n') + '\n', 'utf8');
   } else {
     try { fs.unlinkSync(file); } catch (_) {}
@@ -95,27 +96,79 @@ function setAutostart(enable) {
 
 // ─── Tray icon ────────────────────────────────────────────────────────────────
 
+const trayIconCache = new Map();
+let currentToolTip = 'WhatsApp';
+
+function loadValidatedIcon(fileName) {
+  if (trayIconCache.has(fileName)) return trayIconCache.get(fileName);
+  const p = path.join(__dirname, '..', 'assets', fileName);
+  try {
+    if (fs.existsSync(p)) {
+      const img = nativeImage.createFromPath(p);
+      if (!img.isEmpty()) {
+        trayIconCache.set(fileName, img);
+        return img;
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
 function getTrayIcon() {
   const name = settings.trayAppearance === 'light' ? 'tray-icon-white.png'
     : settings.trayAppearance === 'dark' ? 'tray-icon-black.png' : 'whatsapp-color.png';
-  const p = path.join(__dirname, '..', 'assets', name);
-  return nativeImage.createFromPath(
-    fs.existsSync(p) ? p : path.join(__dirname, '..', 'assets', 'tray-icon.png'));
+  return loadValidatedIcon(name)
+    || loadValidatedIcon('whatsapp-color.png')
+    || loadValidatedIcon('tray-icon.png')
+    || loadValidatedIcon('icons/256x256.png')
+    || nativeImage.createEmpty();
 }
 
 function createTray() {
-  if (tray && !tray.isDestroyed()) return;
-  tray = new Tray(getTrayIcon());
-  tray.setToolTip('WhatsApp');
-  updateTrayMenu();
-  tray.on('click',        toggleWindow);
-  tray.on('double-click', showWindow);
-  // Panel theme and application theme are not necessarily the same on GNOME.
+  try {
+    if (tray && !tray.isDestroyed()) return tray;
+    const icon = getTrayIcon();
+    tray = new Tray(icon);
+    tray.setToolTip(currentToolTip);
+    updateTrayMenu();
+    tray.on('click',        toggleWindow);
+    tray.on('double-click', showWindow);
+    return tray;
+  } catch (err) {
+    console.error('Tray creation failed:', err);
+    tray = null;
+    return null;
+  }
+}
+
+function setupTrayWatcher() {
+  if (process.platform !== 'linux') return;
+  try {
+    const dbus = require('dbus-next');
+    const bus = dbus.sessionBus();
+    bus.getProxyObject('org.kde.StatusNotifierWatcher', '/StatusNotifierWatcher')
+      .then(proxy => {
+        const iface = proxy.getInterface('org.kde.StatusNotifierWatcher');
+        iface.on('StatusNotifierHostRegistered', () => {
+          setTimeout(() => {
+            try {
+              if (tray && !tray.isDestroyed()) {
+                tray.destroy();
+                tray = null;
+              }
+              createTray();
+            } catch (_) {}
+          }, 1000);
+        });
+      })
+      .catch(() => {});
+  } catch (_) {}
 }
 
 function updateTrayMenu() {
-  if (!tray) return;
-  tray.setContextMenu(Menu.buildFromTemplate([
+  try {
+    if (!tray || tray.isDestroyed()) return;
+    tray.setContextMenu(Menu.buildFromTemplate([
     { label: mainWindow?.isVisible() ? 'Hide WhatsApp' : 'Show WhatsApp',
       click: toggleWindow },
     { type: 'separator' },
@@ -141,6 +194,9 @@ function updateTrayMenu() {
     { label: 'Quit WhatsApp',
       click: () => { isQuitting = true; app.quit(); } },
   ]));
+  } catch (err) {
+    console.error('Update tray menu failed:', err);
+  }
 }
 
 function showWindow() {
@@ -375,7 +431,16 @@ ipcMain.on('wa-notification', (event, data) => {
 });
 
 ipcMain.on('unread-count', (_, count) => {
-  tray?.setToolTip(count > 0 ? `WhatsApp (${count})` : 'WhatsApp');
+  currentToolTip = count > 0 ? `WhatsApp (${count})` : 'WhatsApp';
+  try {
+    if (tray && !tray.isDestroyed()) {
+      tray.setToolTip(currentToolTip);
+    } else {
+      createTray();
+    }
+  } catch (_) {
+    try { createTray(); } catch (_) {}
+  }
 });
 
 ipcMain.handle('get-settings',  ()     => settings);
@@ -383,8 +448,17 @@ ipcMain.handle('save-settings', (_, s) => {
   Object.assign(settings, sanitizeSettings(s));
   saveSettings();
   if (typeof s?.autoStart === 'boolean') setAutostart(s.autoStart);
-  tray?.setImage(getTrayIcon());
-  updateTrayMenu();
+  try {
+    if (!tray || tray.isDestroyed()) {
+      createTray();
+    } else {
+      const icon = getTrayIcon();
+      if (!icon.isEmpty()) tray.setImage(icon);
+      updateTrayMenu();
+    }
+  } catch (_) {
+    try { createTray(); } catch (_) {}
+  }
   return settings;
 });
 
@@ -413,6 +487,9 @@ if (!app.requestSingleInstanceLock()) app.quit();
 else app.whenReady().then(() => {
   loadSettings();
   app.setName('WhatsApp');
+  if (process.platform === 'linux' && typeof app.setDesktopName === 'function') {
+    app.setDesktopName('whatsapp.desktop');
+  }
   const waSession = session.fromPartition('persist:whatsapp');
   const allowed = new Set(['media', 'notifications', 'fullscreen']);
   const trusted = url => { try { return new URL(url).origin === 'https://web.whatsapp.com'; } catch (_) { return false; } };
@@ -420,7 +497,7 @@ else app.whenReady().then(() => {
   waSession.setPermissionCheckHandler((wc, permission, origin) => allowed.has(permission) && trusted(origin));
   app.on('second-instance', showWindow);
   createMainWindow();
-  try { createTray(); } catch (error) { console.error(error); settings.closeToTray = false; showWindow(); }
+  try { createTray(); setupTrayWatcher(); } catch (error) { console.error(error); settings.closeToTray = false; showWindow(); }
   try { setAutostart(settings.autoStart); } catch (error) { console.error(error); }
 });
 

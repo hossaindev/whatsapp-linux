@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-linux",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "WhatsApp Desktop for Ubuntu Linux",
   "author": {
     "name": "WhatsApp Linux",
@@ -31,7 +31,10 @@
       "category": "Network;InstantMessaging",
       "icon": "assets/icons",
       "maintainer": "hossaindev",
-      "artifactName": "WhatsApp_${version}_amd64.deb"
+      "artifactName": "WhatsApp_${version}_amd64.deb",
+      "desktop": {
+        "StartupWMClass": "whatsapp"
+      }
     },
     "files": [
       "src/**/*",
