@@ -33,7 +33,9 @@
       "maintainer": "hossaindev",
       "artifactName": "WhatsApp_${version}_amd64.deb",
       "desktop": {
-        "StartupWMClass": "whatsapp"
+        "entry": {
+          "StartupWMClass": "whatsapp"
+        }
       }
     },
     "files": [
@@ -54,5 +56,6 @@
         "libsecret-1-0"
       ]
     }
-  }
+  },
+  "desktopName": "whatsapp.desktop"
 }
