@@ -8,26 +8,60 @@ const path = require('path');
 const fs   = require('fs');
 const os   = require('os');
 
-let mainWindow = null;
-let tray       = null;
-let isQuitting = false;
-let settings   = {};
-let clearingCache = false;
+let mainWindow       = null;
+let guestWebContents = null;
+let tray             = null;
+let isQuitting       = false;
+let settings         = {};
+let clearingCache    = false;
+let sleepTimer       = null;
 
 // Optimization and Linux desktop runtime switches
 if (process.platform === 'linux') {
   app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
-  app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer,VaapiVideoDecoder');
+  app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer,VaapiVideoDecoder,MemoryPurge');
   app.commandLine.appendSwitch('disable-features', 'OptimizationHints,Translate');
   app.commandLine.appendSwitch('disable-site-isolation-trials');
+  app.commandLine.appendSwitch('renderer-process-limit', '2');
+  app.commandLine.appendSwitch('js-flags', '--expose-gc --max-old-space-size=256');
 }
 
 const { cleanCache, sanitizeSettings, safeExternal } = require('./safety');
 
+// ─── Pseudo-Sleep (Background RAM Optimization) ──────────────────────────────
+function schedulePseudoSleep() {
+  if (!settings.pseudoSleep) return;
+  clearTimeout(sleepTimer);
+  sleepTimer = setTimeout(async () => {
+    try {
+      if (mainWindow && !mainWindow.isVisible()) {
+        if (typeof global.gc === 'function') global.gc();
+        const waSession = session.fromPartition('persist:whatsapp');
+        if (typeof waSession.clearHostResolverCache === 'function') {
+          await waSession.clearHostResolverCache().catch(() => {});
+        }
+        if (guestWebContents && !guestWebContents.isDestroyed()) {
+          guestWebContents.send('enter-pseudo-sleep');
+          guestWebContents.executeJavaScript('if (typeof window.gc === "function") window.gc();').catch(() => {});
+        }
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.executeJavaScript('if (typeof window.gc === "function") window.gc();').catch(() => {});
+        }
+      }
+    } catch (_) {}
+  }, 4000);
+}
+
+function wakeFromPseudoSleep() {
+  clearTimeout(sleepTimer);
+  if (guestWebContents && !guestWebContents.isDestroyed()) {
+    guestWebContents.send('wake-pseudo-sleep');
+  }
+}
+
 async function clearCache(parentWindow = null, notifyOnSuccess = false) {
   if (clearingCache) return { error: 'Cache cleanup is already running.' };
 
-  // Only bind modal to parent if parent window is actually visible and restored
   const parent = (parentWindow && typeof parentWindow.isVisible === 'function' && parentWindow.isVisible() && !parentWindow.isMinimized())
     ? parentWindow
     : null;
@@ -96,6 +130,7 @@ function loadSettings() {
   def('startMinimized',         false);
   def('autoStart',              true);
   def('trayAppearance',         'color');
+  def('pseudoSleep',            true);
 }
 
 function shouldStartHidden() {
@@ -236,6 +271,18 @@ function updateTrayMenu() {
       },
       { type: 'separator' },
       {
+        label: 'Pseudo-Sleep (Save RAM)',
+        type: 'checkbox',
+        checked: settings.pseudoSleep,
+        click: m => {
+          settings.pseudoSleep = m.checked;
+          saveSettings();
+          updateTrayMenu();
+          if (settings.pseudoSleep && !mainWindow?.isVisible()) schedulePseudoSleep();
+          else wakeFromPseudoSleep();
+        }
+      },
+      {
         label: 'Run in Background',
         type: 'checkbox',
         checked: settings.closeToTray,
@@ -276,6 +323,7 @@ function updateTrayMenu() {
 
 function showWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) { createMainWindow(); return; }
+  wakeFromPseudoSleep();
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
@@ -285,6 +333,7 @@ function showWindow() {
 function hideWindow() {
   mainWindow?.hide();
   updateTrayMenu();
+  schedulePseudoSleep();
 }
 
 function toggleWindow() {
@@ -298,7 +347,7 @@ function showTrayBalloon() {
   const n = new Notification({
     title: 'WhatsApp',
     silent: true,
-    body: 'Running in background. Click tray icon to restore.',
+    body: 'Running in background (RAM Saver active). Click tray to restore.',
     icon: path.join(__dirname, '..', 'assets', 'icons', '256x256.png'),
   });
   n.on('click', showWindow);
@@ -325,6 +374,7 @@ function createMainWindow() {
       contextIsolation: true,
       webviewTag: true,
       sandbox: true,
+      backgroundThrottling: true,
     },
   });
 
@@ -337,15 +387,20 @@ function createMainWindow() {
     prefs.contextIsolation = true;
     prefs.sandbox = true;
     prefs.preload = path.join(__dirname, 'guest-preload.js');
+    prefs.backgroundThrottling = true;
   });
 
   mainWindow.on('closed', () => { mainWindow = null; app.quit(); });
-  mainWindow.on('show', updateTrayMenu);
-  mainWindow.on('hide', updateTrayMenu);
+  mainWindow.on('show', () => { wakeFromPseudoSleep(); updateTrayMenu(); });
+  mainWindow.on('hide', () => { schedulePseudoSleep(); updateTrayMenu(); });
   mainWindow.loadFile(path.join(__dirname, 'shell.html'));
 
   mainWindow.once('ready-to-show', () => {
-    if (!shouldStartHidden()) mainWindow.show();
+    if (!shouldStartHidden()) {
+      mainWindow.show();
+    } else {
+      schedulePseudoSleep();
+    }
   });
 
   mainWindow.on('minimize', e => {
@@ -368,6 +423,9 @@ function createMainWindow() {
   mainWindow.on('unmaximize', () => mainWindow.webContents.send('win-state', { maximized: false }));
 
   mainWindow.webContents.on('did-attach-webview', (_, wc) => {
+    guestWebContents = wc;
+    wc.setBackgroundThrottling(true);
+
     wc.setWindowOpenHandler(({ url }) => { openExternal(url); return { action: 'deny' }; });
     wc.on('will-navigate', (event, url) => {
       try { if (new URL(url).origin === 'https://web.whatsapp.com') return; } catch (_) {}
@@ -561,6 +619,7 @@ ipcMain.on('open-external', (event, url) => {
 ipcMain.on('call-state', (event, state) => {
   if (event.sender !== mainWindow?.webContents) return;
   if (!state?.active) { callNotifications.close(); return; }
+  wakeFromPseudoSleep();
   if (settings.enableNotifications && typeof state.id === 'string') callNotifications.show(state.id);
 });
 
@@ -606,6 +665,7 @@ app.on('window-all-closed', () => app.quit());
 app.on('activate', () => (mainWindow ? showWindow() : createMainWindow()));
 app.on('before-quit', () => {
   isQuitting = true;
+  clearTimeout(sleepTimer);
   callNotifications.close();
   tray?.destroy();
   tray = null;

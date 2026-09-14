@@ -1,9 +1,10 @@
 'use strict';
 const { ipcRenderer } = require('electron');
-// No Node API is exposed to the remote page. Call actions require live, visible controls.
+
 let activeId = null;
 let sequence = 0;
 let timer;
+
 function controls() {
   const buttons = [...document.querySelectorAll('button,[role="button"]')].filter(el => el.getClientRects().length && !el.disabled && el.getAttribute('aria-disabled') !== 'true');
   const label = el => (el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || '').trim();
@@ -12,6 +13,7 @@ function controls() {
     decline: buttons.find(el => /^(decline|reject)( call)?$/i.test(label(el)))
   };
 }
+
 function update() {
   const found = controls();
   const active = Boolean(found.accept && found.decline);
@@ -26,6 +28,7 @@ function update() {
   ipcRenderer.sendToHost('unread-count', match ? Number(match[1]) : 0);
   ipcRenderer.sendToHost('wa-title', document.title || 'WhatsApp');
 }
+
 ipcRenderer.on('call-action', (_, data) => {
   if (!data || data.id !== activeId || !['accept','decline'].includes(data.action)) {
     ipcRenderer.sendToHost('call-result', { ok: false }); return;
@@ -39,12 +42,35 @@ ipcRenderer.on('call-action', (_, data) => {
     update();
   }, 1500);
 });
+
+// Background pseudo-sleep: clean idle media caches and force V8 garbage collection
+ipcRenderer.on('enter-pseudo-sleep', () => {
+  try {
+    document.querySelectorAll('video, audio').forEach(media => {
+      // Never pause if an active call UI is visible
+      if (!media.closest?.('[data-testid="call-modal"], [data-testid="incoming-call"]')) {
+        media.pause?.();
+      }
+    });
+    if (typeof window.gc === 'function') window.gc();
+  } catch (_) {}
+});
+
+ipcRenderer.on('wake-pseudo-sleep', () => {
+  update();
+});
+
 window.addEventListener('DOMContentLoaded', () => {
   const observer = new MutationObserver(() => {
     if (timer) return;
     timer = setTimeout(() => { timer = null; update(); }, 300);
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label','title','disabled'] });
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['aria-label','title','disabled']
+  });
   update();
   window.addEventListener('pagehide', () => { observer.disconnect(); clearTimeout(timer); }, { once: true });
 });

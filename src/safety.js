@@ -6,7 +6,7 @@ async function cleanCache(session) {
 }
 function sanitizeSettings(input) {
   const result = {};
-  for (const key of ['minimizeToTray','closeToTray','showUnreadCountInTitle','enableNotifications','notificationSound','startMinimized','autoStart']) {
+  for (const key of ['minimizeToTray','closeToTray','showUnreadCountInTitle','enableNotifications','notificationSound','startMinimized','autoStart','pseudoSleep']) {
     if (typeof input?.[key] === 'boolean') result[key] = input[key];
   }
   if (['color','light','dark'].includes(input?.trayAppearance)) result.trayAppearance = input.trayAppearance;
