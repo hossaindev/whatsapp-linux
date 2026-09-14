@@ -1,13 +1,12 @@
-# WhatsApp Linux 1.2.0
+# WhatsApp Desktop for Linux — Version 1.3.0 Release Notes
 
-### Fixes & Improvements
-- **Taskbar icon fix**: Configured `StartupWMClass: whatsapp` and desktop name matching `whatsapp.desktop` so GNOME, KDE, and other Linux desktop environments display the official green WhatsApp icon instead of a generic gear or Wayland placeholder icon.
-- **Tray icon stability**: Added icon validation and caching with graceful fallbacks if icon assets are missing or corrupted. Added safeguards across all tray interactions and automatic tray re-registration if the desktop panel restarts, preventing blank icons or tray crashes.
-- **Reproducible builds**: Added `package-lock.json` and updated CI dependencies for deterministic packaging.
-- **Automated release workflow**: CI automatically builds and attaches `WhatsApp_1.2.0_amd64.deb` to GitHub Releases on `v*` tag pushes.
+### Native System Tray & Indicator Stability
+- **Fixed Tray Rendering on Linux**: Fixed an issue where the color tray icon failed to render or appeared distorted on GNOME AppIndicator, KDE StatusNotifierItem, and XFCE panels due to oversized asset definitions. Pre-rendered pixel-crisp 22x22 and 24x24 tray assets and enforced runtime downscaling.
+- **Standalone Cache Clearing**: You can now clear the browser cache directly from the system tray menu (`Clear Cache…`) even when WhatsApp is minimized or hidden in the background, without needing to restore or open the main window.
+- **Background Notification on Cleanup**: Replaced blocking modal popups with non-intrusive desktop notifications upon cache cleanup completion.
 
-### Installation
-Download the attached `WhatsApp_1.2.0_amd64.deb` from the release assets and install via:
-```bash
-sudo apt install ./WhatsApp_1.2.0_amd64.deb
-```
+### Performance & Package Optimization
+- **Lighter .deb Package**: Configured `maximum` compression and `xz` archive packaging for Debian distributions, noticeably reducing download footprint.
+- **Optimized Chromium Engine Switches**: Disabled unnecessary telemetry and site isolation overhead for the webview container to cut down memory consumption and CPU usage.
+- **Hardware Acceleration**: Enabled PipeWire WebRTC screen capture and VA-API hardware video decode flags for smooth calling on Linux.
+- **Official Native Meta Polish**: Added native Linux desktop shortcuts (`Ctrl+Q` to quit, `Ctrl+W` to close to tray, `F5` / `Ctrl+R` to reload), enhanced `.desktop` categories, keywords, and Meta authorship metadata.

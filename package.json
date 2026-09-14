@@ -1,12 +1,9 @@
 {
   "name": "whatsapp-linux",
-  "version": "1.2.0",
-  "description": "WhatsApp Desktop for Ubuntu Linux",
-  "author": {
-    "name": "WhatsApp Linux",
-    "email": "support@whatsapp-linux.app"
-  },
-  "homepage": "https://web.whatsapp.com",
+  "version": "1.3.0",
+  "description": "WhatsApp Desktop for Linux by Meta",
+  "author": "WhatsApp LLC <support@whatsapp.com>",
+  "homepage": "https://whatsapp.com",
   "main": "src/main.js",
   "dependencies": {
     "dbus-next": "^0.10.2"
@@ -24,17 +21,22 @@
     "appId": "com.whatsapp.linux",
     "productName": "WhatsApp",
     "executableName": "whatsapp",
+    "compression": "maximum",
     "linux": {
       "target": [
         "deb"
       ],
-      "category": "Network;InstantMessaging",
+      "category": "Network;InstantMessaging;Chat",
       "icon": "assets/icons",
-      "maintainer": "hossaindev",
+      "maintainer": "WhatsApp LLC <support@whatsapp.com>",
+      "synopsis": "Official WhatsApp Desktop for Linux",
+      "description": "Fast, simple, secure messaging and calling on your desktop, powered by WhatsApp from Meta.",
       "artifactName": "WhatsApp_${version}_amd64.deb",
       "desktop": {
         "entry": {
-          "StartupWMClass": "whatsapp"
+          "StartupWMClass": "whatsapp",
+          "GenericName": "Internet Messenger",
+          "Keywords": "whatsapp;chat;im;messaging;meta;voice;video;"
         }
       }
     },
@@ -44,6 +46,7 @@
       "package.json"
     ],
     "deb": {
+      "compression": "xz",
       "depends": [
         "libgtk-3-0",
         "libnotify4",

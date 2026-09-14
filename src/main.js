@@ -12,31 +12,71 @@ let mainWindow = null;
 let tray       = null;
 let isQuitting = false;
 let settings   = {};
+let clearingCache = false;
 
-// Disable sandbox to avoid chrome-sandbox setuid requirement on install
+// Optimization and Linux desktop runtime switches
 if (process.platform === 'linux') {
   app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
-  app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer');
+  app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer,VaapiVideoDecoder');
+  app.commandLine.appendSwitch('disable-features', 'OptimizationHints,Translate');
+  app.commandLine.appendSwitch('disable-site-isolation-trials');
 }
+
 const { cleanCache, sanitizeSettings, safeExternal } = require('./safety');
-let clearingCache = false;
-async function clearCache() {
+
+async function clearCache(parentWindow = null, notifyOnSuccess = false) {
   if (clearingCache) return { error: 'Cache cleanup is already running.' };
-  const answer = await dialog.showMessageBox(mainWindow, {
-    type: 'question', buttons: ['Cancel', 'Clear cache'], defaultId: 0, cancelId: 0,
+
+  // Only bind modal to parent if parent window is actually visible and restored
+  const parent = (parentWindow && typeof parentWindow.isVisible === 'function' && parentWindow.isVisible() && !parentWindow.isMinimized())
+    ? parentWindow
+    : null;
+
+  const answer = await dialog.showMessageBox(parent, {
+    type: 'question',
+    buttons: ['Cancel', 'Clear cache'],
+    defaultId: 1,
+    cancelId: 0,
+    title: 'Clear Cache - WhatsApp',
     message: 'Clear temporary browser cache?',
-    detail: 'Your login, chats, cookies and settings will be kept. Avoid clearing cache during a call.'
+    detail: 'Your login, chats, cookies, and settings will be preserved. Avoid clearing cache during an active call.'
   });
+
   if (answer.response !== 1) return { cancelled: true };
   clearingCache = true;
   try {
     const bytes = await cleanCache(session.fromPartition('persist:whatsapp'));
-    return { bytes };
-  } catch (error) { return { error: error.message }; }
-  finally { clearingCache = false; }
-}
-function openExternal(url) { if (safeExternal(url)) shell.openExternal(url).catch(console.error); }
+    const mb = (bytes / (1024 * 1024)).toFixed(1);
 
+    if (notifyOnSuccess || !parent) {
+      if (Notification.isSupported()) {
+        new Notification({
+          title: 'WhatsApp',
+          body: `Cleared ${mb} MB of temporary cache. Login and chats preserved.`,
+          icon: path.join(__dirname, '..', 'assets', 'icons', '256x256.png')
+        }).show();
+      } else {
+        await dialog.showMessageBox(null, {
+          type: 'info',
+          title: 'WhatsApp',
+          message: `Cleared ${mb} MB of temporary cache.`
+        });
+      }
+    }
+    return { bytes };
+  } catch (error) {
+    if (notifyOnSuccess || !parent) {
+      dialog.showErrorBox('Cache Cleanup Error', error.message || 'Failed to clear cache.');
+    }
+    return { error: error.message };
+  } finally {
+    clearingCache = false;
+  }
+}
+
+function openExternal(url) {
+  if (safeExternal(url)) shell.openExternal(url).catch(console.error);
+}
 
 // ─── Settings ────────────────────────────────────────────────────────────────
 
@@ -55,18 +95,19 @@ function loadSettings() {
   def('notificationSound',      true);
   def('startMinimized',         false);
   def('autoStart',              true);
-  def('trayAppearance', 'color');
+  def('trayAppearance',         'color');
 }
 
-// True when launched at login via the autostart .desktop file (--hidden flag)
-// or when the user has enabled "Start minimized" in settings.
 function shouldStartHidden() {
   return process.argv.includes('--hidden') || settings.startMinimized;
 }
 
 function saveSettings() {
-  try { fs.mkdirSync(path.dirname(settingsPath), { recursive: true }); fs.writeFileSync(settingsPath + '.tmp', JSON.stringify(settings, null, 2), 'utf8'); fs.renameSync(settingsPath + '.tmp', settingsPath); }
-  catch (_) {}
+  try {
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath + '.tmp', JSON.stringify(settings, null, 2), 'utf8');
+    fs.renameSync(settingsPath + '.tmp', settingsPath);
+  } catch (_) {}
 }
 
 // ─── Linux autostart ─────────────────────────────────────────────────────────
@@ -85,7 +126,7 @@ function setAutostart(enable) {
       : `"${process.execPath}" "${path.join(__dirname, '..')}" --hidden`;
     fs.writeFileSync(file,
       ['[Desktop Entry]', 'Type=Application', 'Name=WhatsApp',
-       'Comment=WhatsApp Desktop', `Exec=${exec}`,
+       'Comment=WhatsApp Desktop by Meta', `Exec=${exec}`,
        'Icon=whatsapp', 'Terminal=false', 'Hidden=false',
        'StartupWMClass=whatsapp',
        'X-GNOME-Autostart-enabled=true'].join('\n') + '\n', 'utf8');
@@ -99,14 +140,19 @@ function setAutostart(enable) {
 const trayIconCache = new Map();
 let currentToolTip = 'WhatsApp';
 
-function loadValidatedIcon(fileName) {
-  if (trayIconCache.has(fileName)) return trayIconCache.get(fileName);
+function loadValidatedIcon(fileName, targetSize = 22) {
+  const cacheKey = `${fileName}_${targetSize}`;
+  if (trayIconCache.has(cacheKey)) return trayIconCache.get(cacheKey);
   const p = path.join(__dirname, '..', 'assets', fileName);
   try {
     if (fs.existsSync(p)) {
-      const img = nativeImage.createFromPath(p);
+      let img = nativeImage.createFromPath(p);
       if (!img.isEmpty()) {
-        trayIconCache.set(fileName, img);
+        const size = img.getSize();
+        if (size.width > 32 || size.height > 32) {
+          img = img.resize({ width: targetSize, height: targetSize, quality: 'best' });
+        }
+        trayIconCache.set(cacheKey, img);
         return img;
       }
     }
@@ -115,12 +161,15 @@ function loadValidatedIcon(fileName) {
 }
 
 function getTrayIcon() {
-  const name = settings.trayAppearance === 'light' ? 'tray-icon-white.png'
-    : settings.trayAppearance === 'dark' ? 'tray-icon-black.png' : 'whatsapp-color.png';
-  return loadValidatedIcon(name)
-    || loadValidatedIcon('whatsapp-color.png')
-    || loadValidatedIcon('tray-icon.png')
-    || loadValidatedIcon('icons/256x256.png')
+  const appearance = settings.trayAppearance || 'color';
+  const name = appearance === 'light' ? 'tray-icon-white.png'
+    : appearance === 'dark' ? 'tray-icon-black.png'
+    : 'tray-icon-color.png';
+
+  return loadValidatedIcon(name, 22)
+    || loadValidatedIcon('tray-icon-color.png', 22)
+    || loadValidatedIcon('tray-icon.png', 22)
+    || loadValidatedIcon('whatsapp-color.png', 22)
     || nativeImage.createEmpty();
 }
 
@@ -130,8 +179,11 @@ function createTray() {
     const icon = getTrayIcon();
     tray = new Tray(icon);
     tray.setToolTip(currentToolTip);
+    if (typeof tray.setIgnoreDoubleClickEvents === 'function') {
+      tray.setIgnoreDoubleClickEvents(true);
+    }
     updateTrayMenu();
-    tray.on('click',        toggleWindow);
+    tray.on('click', toggleWindow);
     tray.on('double-click', showWindow);
     return tray;
   } catch (err) {
@@ -169,31 +221,54 @@ function updateTrayMenu() {
   try {
     if (!tray || tray.isDestroyed()) return;
     tray.setContextMenu(Menu.buildFromTemplate([
-    { label: mainWindow?.isVisible() ? 'Hide WhatsApp' : 'Show WhatsApp',
-      click: toggleWindow },
-    { type: 'separator' },
-    { label: 'Clear cache…', click: async () => {
-      const result = await clearCache();
-      if (!result.cancelled) dialog.showMessageBox(mainWindow, { message: result.error || `Cleared ${(result.bytes / 1048576).toFixed(1)} MB of temporary cache.` });
-    } },
-    { label: 'Settings',
-      click: () => { showWindow(); mainWindow?.webContents.send('open-settings'); } },
-    { type: 'separator' },
-    { label: 'Run in Background', type: 'checkbox', checked: settings.closeToTray,
-      click: m => {
-        settings.closeToTray = m.checked;
-        saveSettings(); updateTrayMenu();
-      }},
-    { label: 'Minimize to Tray', type: 'checkbox', checked: settings.minimizeToTray,
-      click: m => { settings.minimizeToTray = m.checked; saveSettings(); }},
-    { label: 'Launch at Login', type: 'checkbox', checked: settings.autoStart,
-      click: m => { settings.autoStart = m.checked; saveSettings(); setAutostart(m.checked); }},
-    { label: 'Notifications', type: 'checkbox', checked: settings.enableNotifications,
-      click: m => { settings.enableNotifications = m.checked; saveSettings(); }},
-    { type: 'separator' },
-    { label: 'Quit WhatsApp',
-      click: () => { isQuitting = true; app.quit(); } },
-  ]));
+      {
+        label: mainWindow?.isVisible() ? 'Hide WhatsApp' : 'Open WhatsApp',
+        click: toggleWindow
+      },
+      { type: 'separator' },
+      {
+        label: 'Clear Cache…',
+        click: () => { clearCache(null, true); }
+      },
+      {
+        label: 'Settings',
+        click: () => { showWindow(); mainWindow?.webContents.send('open-settings'); }
+      },
+      { type: 'separator' },
+      {
+        label: 'Run in Background',
+        type: 'checkbox',
+        checked: settings.closeToTray,
+        click: m => {
+          settings.closeToTray = m.checked;
+          saveSettings();
+          updateTrayMenu();
+        }
+      },
+      {
+        label: 'Minimize to Tray',
+        type: 'checkbox',
+        checked: settings.minimizeToTray,
+        click: m => { settings.minimizeToTray = m.checked; saveSettings(); }
+      },
+      {
+        label: 'Launch at Login',
+        type: 'checkbox',
+        checked: settings.autoStart,
+        click: m => { settings.autoStart = m.checked; saveSettings(); setAutostart(m.checked); }
+      },
+      {
+        label: 'Notifications',
+        type: 'checkbox',
+        checked: settings.enableNotifications,
+        click: m => { settings.enableNotifications = m.checked; saveSettings(); }
+      },
+      { type: 'separator' },
+      {
+        label: 'Quit WhatsApp',
+        click: () => { isQuitting = true; app.quit(); }
+      }
+    ]));
   } catch (err) {
     console.error('Update tray menu failed:', err);
   }
@@ -202,22 +277,32 @@ function updateTrayMenu() {
 function showWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) { createMainWindow(); return; }
   if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show(); mainWindow.focus();
+  mainWindow.show();
+  mainWindow.focus();
   updateTrayMenu();
 }
-function hideWindow() { mainWindow?.hide(); updateTrayMenu(); }
-function toggleWindow() { mainWindow?.isVisible() ? hideWindow() : showWindow(); }
+
+function hideWindow() {
+  mainWindow?.hide();
+  updateTrayMenu();
+}
+
+function toggleWindow() {
+  mainWindow?.isVisible() ? hideWindow() : showWindow();
+}
 
 let _balloonShown = false;
 function showTrayBalloon() {
   if (_balloonShown || !Notification.isSupported()) return;
   _balloonShown = true;
   const n = new Notification({
-    title: 'WhatsApp', silent: true,
-    body: 'Running in the background. Click the tray icon to restore.',
+    title: 'WhatsApp',
+    silent: true,
+    body: 'Running in background. Click tray icon to restore.',
     icon: path.join(__dirname, '..', 'assets', 'icons', '256x256.png'),
   });
-  n.on('click', showWindow); n.show();
+  n.on('click', showWindow);
+  n.show();
 }
 
 // ─── Main window ──────────────────────────────────────────────────────────────
@@ -226,27 +311,34 @@ function createMainWindow() {
   Menu.setApplicationMenu(null);
 
   mainWindow = new BrowserWindow({
-    width: 1280, height: 800, minWidth: 800, minHeight: 600,
-    frame:           false,   // OS titlebar completely removed
+    width: 1280,
+    height: 800,
+    minWidth: 800,
+    minHeight: 600,
+    frame: false,
     backgroundColor: '#111b21',
     icon: path.join(__dirname, '..', 'assets', 'icons', '256x256.png'),
     show: false,
     webPreferences: {
-      preload:          path.join(__dirname, 'preload.js'),
-      nodeIntegration:  false,
+      preload: path.join(__dirname, 'preload.js'),
+      nodeIntegration: false,
       contextIsolation: true,
-      webviewTag:       true,   // enable <webview> in shell.html
-      sandbox:          true,
+      webviewTag: true,
+      sandbox: true,
     },
   });
 
   mainWindow.webContents.on('will-attach-webview', (event, prefs, params) => {
-    if (params.src !== 'https://web.whatsapp.com/' && params.src !== 'https://web.whatsapp.com') { event.preventDefault(); return; }
+    if (params.src !== 'https://web.whatsapp.com/' && params.src !== 'https://web.whatsapp.com') {
+      event.preventDefault();
+      return;
+    }
     prefs.nodeIntegration = false;
     prefs.contextIsolation = true;
     prefs.sandbox = true;
     prefs.preload = path.join(__dirname, 'guest-preload.js');
   });
+
   mainWindow.on('closed', () => { mainWindow = null; app.quit(); });
   mainWindow.on('show', updateTrayMenu);
   mainWindow.on('hide', updateTrayMenu);
@@ -254,139 +346,137 @@ function createMainWindow() {
 
   mainWindow.once('ready-to-show', () => {
     if (!shouldStartHidden()) mainWindow.show();
-    // If hidden at start, tray icon is still created — user can click it to open
   });
 
-  // ── Minimize behaviour: taskbar by default, tray only if setting is ON ──
-  // This does NOT intercept the custom btn-min click — that always goes to taskbar.
-  // Only applies to OS-level minimize (keyboard shortcuts, taskbar button, etc.)
   mainWindow.on('minimize', e => {
     if (settings.minimizeToTray) {
       e.preventDefault();
       hideWindow();
       showTrayBalloon();
     }
-    // If minimizeToTray is OFF → default OS minimize to taskbar (no preventDefault)
   });
 
-  // ── Close behaviour: hide to tray if closeToTray ON, else quit ──
-  // The custom btn-close sends 'win-close' IPC which calls mainWindow.close(),
-  // triggering this event — so the setting still applies if the user wants it.
   mainWindow.on('close', e => {
     if (!isQuitting && settings.closeToTray) {
       e.preventDefault();
       hideWindow();
       showTrayBalloon();
     }
-    // If closeToTray is OFF → window actually closes / app quits
   });
 
-  // Forward maximize state for button icon
   mainWindow.on('maximize',   () => mainWindow.webContents.send('win-state', { maximized: true }));
   mainWindow.on('unmaximize', () => mainWindow.webContents.send('win-state', { maximized: false }));
 
-  // ── Webview keyboard shortcuts + right-click context menu ─────────────────
   mainWindow.webContents.on('did-attach-webview', (_, wc) => {
     wc.setWindowOpenHandler(({ url }) => { openExternal(url); return { action: 'deny' }; });
     wc.on('will-navigate', (event, url) => {
       try { if (new URL(url).origin === 'https://web.whatsapp.com') return; } catch (_) {}
       event.preventDefault(); openExternal(url);
     });
+
     let crashes = [];
     wc.on('render-process-gone', (_, details) => {
       callNotifications.close();
       if (details.reason === 'clean-exit') return;
       crashes = crashes.filter(t => Date.now() - t < 60000);
-      if (crashes.length >= 2) { showWindow(); dialog.showErrorBox('WhatsApp stopped responding', 'Please restart WhatsApp. Repeated automatic reloads have been stopped.'); return; }
+      if (crashes.length >= 2) {
+        showWindow();
+        dialog.showErrorBox('WhatsApp stopped responding', 'Please restart WhatsApp. Repeated automatic reloads have been stopped.');
+        return;
+      }
       crashes.push(Date.now());
       setTimeout(() => { if (!wc.isDestroyed()) wc.reload(); }, 2000);
     });
-    wc.on('did-start-navigation', (_, url, inPlace, isMainFrame) => { if (isMainFrame && !inPlace) callNotifications.close(); });
 
+    wc.on('did-start-navigation', (_, url, inPlace, isMainFrame) => {
+      if (isMainFrame && !inPlace) callNotifications.close();
+    });
 
-    // Keyboard shortcuts (Chrome-like)
+    // Native Linux keyboard shortcuts
     wc.on('before-input-event', (event, input) => {
       if (input.type !== 'keyDown') return;
       const ctrl  = input.control || input.meta;
       const shift = input.shift;
       const key   = input.key;
 
-      if (ctrl && key === 'r' && !shift)  { event.preventDefault(); wc.reload(); }
-      if (ctrl && key === 'R' &&  shift)  { event.preventDefault(); wc.reloadIgnoringCache(); }
-      if (key === 'F5')                   { event.preventDefault(); wc.reload(); }
-      if (input.alt && key === 'ArrowLeft')  { event.preventDefault(); if (wc.canGoBack())    wc.goBack(); }
-      if (input.alt && key === 'ArrowRight') { event.preventDefault(); if (wc.canGoForward()) wc.goForward(); }
-      if (ctrl && key === '=' )           { event.preventDefault(); wc.setZoomLevel(wc.getZoomLevel() + 0.5); }
-      if (ctrl && key === '-' )           { event.preventDefault(); wc.setZoomLevel(wc.getZoomLevel() - 0.5); }
-      if (ctrl && key === '0' )           { event.preventDefault(); wc.setZoomLevel(0); }
-      if (ctrl && shift && key === 'I')   { event.preventDefault(); wc.openDevTools(); }
-      if (ctrl && key === 'a' || ctrl && key === 'A') { /* allow select-all through */ }
+      if (ctrl && (key === 'q' || key === 'Q')) {
+        event.preventDefault();
+        isQuitting = true;
+        app.quit();
+      } else if (ctrl && (key === 'w' || key === 'W')) {
+        event.preventDefault();
+        if (settings.closeToTray) {
+          hideWindow();
+          showTrayBalloon();
+        } else {
+          mainWindow.close();
+        }
+      } else if (ctrl && key === 'r' && !shift) {
+        event.preventDefault(); wc.reload();
+      } else if ((ctrl && key === 'R' && shift) || key === 'F5') {
+        event.preventDefault(); wc.reloadIgnoringCache();
+      } else if (input.alt && key === 'ArrowLeft') {
+        event.preventDefault(); if (wc.canGoBack()) wc.goBack();
+      } else if (input.alt && key === 'ArrowRight') {
+        event.preventDefault(); if (wc.canGoForward()) wc.goForward();
+      } else if (ctrl && (key === '=' || key === '+')) {
+        event.preventDefault(); wc.setZoomLevel(wc.getZoomLevel() + 0.5);
+      } else if (ctrl && key === '-') {
+        event.preventDefault(); wc.setZoomLevel(wc.getZoomLevel() - 0.5);
+      } else if (ctrl && key === '0') {
+        event.preventDefault(); wc.setZoomLevel(0);
+      } else if (ctrl && shift && (key === 'i' || key === 'I')) {
+        event.preventDefault(); wc.openDevTools();
+      }
     });
 
-    // Right-click context menu
+    // Context menu
     wc.on('context-menu', (_, params) => {
-      const items = [];
-
-      // ── Navigation ─────────────────────────────────────────────────────
-      items.push(
+      const items = [
         { label: 'Back',    enabled: wc.canGoBack(),    click: () => wc.goBack()    },
         { label: 'Forward', enabled: wc.canGoForward(), click: () => wc.goForward() },
         { label: 'Reload',                              click: () => wc.reload()    },
         { type: 'separator' }
-      );
+      ];
 
-      // ── Image options ───────────────────────────────────────────────────
       if (params.mediaType === 'image' && params.srcURL) {
         items.push(
-          { label: 'Copy Image',
-            click: () => wc.copyImageAt(params.x, params.y) },
-          { label: 'Copy Image Address',
-            click: () => clipboard.writeText(params.srcURL) },
-          { label: 'Open Image in Browser',
-            click: () => openExternal(params.srcURL) },
-          { label: 'Save Image As…',
-            click: () => wc.downloadURL(params.srcURL) },
+          { label: 'Copy Image',            click: () => wc.copyImageAt(params.x, params.y) },
+          { label: 'Copy Image Address',    click: () => clipboard.writeText(params.srcURL) },
+          { label: 'Open Image in Browser', click: () => openExternal(params.srcURL) },
+          { label: 'Save Image As…',        click: () => wc.downloadURL(params.srcURL) },
           { type: 'separator' }
         );
       }
 
-      // ── Link options ────────────────────────────────────────────────────
       if (params.linkURL) {
         items.push(
-          { label: 'Open Link in Browser',
-            click: () => openExternal(params.linkURL) },
-          { label: 'Copy Link Address',
-            click: () => clipboard.writeText(params.linkURL) },
+          { label: 'Open Link in Browser', click: () => openExternal(params.linkURL) },
+          { label: 'Copy Link Address',    click: () => clipboard.writeText(params.linkURL) },
           { type: 'separator' }
         );
       }
 
-      // ── Text / edit options ─────────────────────────────────────────────
       if (params.selectionText) {
         items.push(
-          { label: 'Copy',
-            click: () => wc.copy() },
-          { label: `Search Google for "${params.selectionText.slice(0, 30)}${params.selectionText.length > 30 ? '…' : ''}"`,
-            click: () => openExternal(
-              `https://www.google.com/search?q=${encodeURIComponent(params.selectionText)}`) },
+          { label: 'Copy', click: () => wc.copy() },
+          { label: `Search Web for "${params.selectionText.slice(0, 30)}${params.selectionText.length > 30 ? '…' : ''}"`,
+            click: () => openExternal(`https://www.google.com/search?q=${encodeURIComponent(params.selectionText)}`) },
           { type: 'separator' }
         );
       }
 
       if (params.isEditable) {
         items.push(
-          { label: 'Cut',       role: 'cut',       enabled: params.editFlags.canCut   },
-          { label: 'Copy',      role: 'copy',      enabled: params.editFlags.canCopy  },
-          { label: 'Paste',     role: 'paste',     enabled: params.editFlags.canPaste },
-          { label: 'Select All',role: 'selectAll'  },
+          { label: 'Cut',        role: 'cut',       enabled: params.editFlags.canCut   },
+          { label: 'Copy',       role: 'copy',      enabled: params.editFlags.canCopy  },
+          { label: 'Paste',      role: 'paste',     enabled: params.editFlags.canPaste },
+          { label: 'Select All', role: 'selectAll' },
           { type: 'separator' }
         );
       }
 
-      // ── Dev ─────────────────────────────────────────────────────────────
-      items.push({ label: 'Inspect Element',
-        click: () => wc.inspectElement(params.x, params.y) });
-
+      items.push({ label: 'Inspect Element', click: () => wc.inspectElement(params.x, params.y) });
       const menu = Menu.buildFromTemplate(items);
       menu.popup({ window: mainWindow });
     });
@@ -395,39 +485,28 @@ function createMainWindow() {
 
 // ─── IPC ──────────────────────────────────────────────────────────────────────
 
-// Window control buttons — work independently, pass straight through to OS
-ipcMain.on('win-minimize', () => {
-  // Always minimize to taskbar from button — ignore minimizeToTray setting
-  if (!mainWindow) return;
-  mainWindow.minimize();
-});
-
+ipcMain.on('win-minimize', () => { mainWindow?.minimize(); });
 ipcMain.on('win-maximize', () => {
   if (!mainWindow) return;
   mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();
 });
-
-ipcMain.on('win-close', () => {
-  // Triggers the 'close' event above — closeToTray setting applies there
-  if (!mainWindow) return;
-  mainWindow.close();
-});
-
+ipcMain.on('win-close', () => { mainWindow?.close(); });
 ipcMain.handle('win-is-maximized', () => mainWindow?.isMaximized() ?? false);
 
-// Notifications relayed from webview → shell preload → main
 ipcMain.on('wa-notification', (event, data) => {
   if (event.sender !== mainWindow?.webContents || !data || typeof data.title !== 'string') return;
   const { title, body, type } = data;
   if (!settings.enableNotifications) return;
   const n = new Notification({
-    title: title || 'WhatsApp', body: body || '',
+    title: title || 'WhatsApp',
+    body: body || '',
     icon: path.join(__dirname, '..', 'assets', 'icons', '256x256.png'),
     silent: !settings.notificationSound,
-    urgency:     type === 'call' ? 'critical' : 'normal',
-    timeoutType: type === 'call' ? 'never'    : 'default',
+    urgency: type === 'call' ? 'critical' : 'normal',
+    timeoutType: type === 'call' ? 'never' : 'default',
   });
-  n.on('click', showWindow); n.show();
+  n.on('click', showWindow);
+  n.show();
 });
 
 ipcMain.on('unread-count', (_, count) => {
@@ -443,7 +522,7 @@ ipcMain.on('unread-count', (_, count) => {
   }
 });
 
-ipcMain.handle('get-settings',  ()     => settings);
+ipcMain.handle('get-settings', () => settings);
 ipcMain.handle('save-settings', (_, s) => {
   Object.assign(settings, sanitizeSettings(s));
   saveSettings();
@@ -470,13 +549,21 @@ const callNotifications = new CallNotifications({
   onAction: (action, id) => mainWindow?.webContents.send('call-action', { action, id }),
   onFailure: message => { new Notification({ title: 'WhatsApp call', body: message }).show(); }
 });
-ipcMain.handle('clear-cache', event => event.sender === mainWindow?.webContents ? clearCache() : { error: 'Unauthorized' });
-ipcMain.on('open-external', (event, url) => { if (event.sender === mainWindow?.webContents) openExternal(url); });
+
+ipcMain.handle('clear-cache', event => {
+  return event.sender === mainWindow?.webContents ? clearCache(mainWindow, false) : { error: 'Unauthorized' };
+});
+
+ipcMain.on('open-external', (event, url) => {
+  if (event.sender === mainWindow?.webContents) openExternal(url);
+});
+
 ipcMain.on('call-state', (event, state) => {
   if (event.sender !== mainWindow?.webContents) return;
   if (!state?.active) { callNotifications.close(); return; }
   if (settings.enableNotifications && typeof state.id === 'string') callNotifications.show(state.id);
 });
+
 ipcMain.on('call-result', (event, result) => {
   if (event.sender !== mainWindow?.webContents) return;
   if (!result?.ok) callNotifications.fail('Call action unavailable. Open WhatsApp to check the call.');
@@ -492,15 +579,34 @@ else app.whenReady().then(() => {
   }
   const waSession = session.fromPartition('persist:whatsapp');
   const allowed = new Set(['media', 'notifications', 'fullscreen']);
-  const trusted = url => { try { return new URL(url).origin === 'https://web.whatsapp.com'; } catch (_) { return false; } };
-  waSession.setPermissionRequestHandler((wc, permission, callback, details) => callback(allowed.has(permission) && trusted(details.requestingUrl || wc.getURL())));
-  waSession.setPermissionCheckHandler((wc, permission, origin) => allowed.has(permission) && trusted(origin));
+  const trusted = url => {
+    try { return new URL(url).origin === 'https://web.whatsapp.com'; } catch (_) { return false; }
+  };
+  waSession.setPermissionRequestHandler((wc, permission, callback, details) =>
+    callback(allowed.has(permission) && trusted(details.requestingUrl || wc.getURL()))
+  );
+  waSession.setPermissionCheckHandler((wc, permission, origin) =>
+    allowed.has(permission) && trusted(origin)
+  );
+
   app.on('second-instance', showWindow);
   createMainWindow();
-  try { createTray(); setupTrayWatcher(); } catch (error) { console.error(error); settings.closeToTray = false; showWindow(); }
+  try {
+    createTray();
+    setupTrayWatcher();
+  } catch (error) {
+    console.error(error);
+    settings.closeToTray = false;
+    showWindow();
+  }
   try { setAutostart(settings.autoStart); } catch (error) { console.error(error); }
 });
 
 app.on('window-all-closed', () => app.quit());
-app.on('activate',          () => mainWindow ? showWindow() : createMainWindow());
-app.on('before-quit', () => { isQuitting = true; callNotifications.close(); tray?.destroy(); tray = null; });
+app.on('activate', () => (mainWindow ? showWindow() : createMainWindow()));
+app.on('before-quit', () => {
+  isQuitting = true;
+  callNotifications.close();
+  tray?.destroy();
+  tray = null;
+});
